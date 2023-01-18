@@ -10,9 +10,9 @@ from model_onnx import SynthesizerTrn
 import utils
 from hubert import hubert_model_onnx
 
-def main(HubertExport,NetExport):
+def main(HubertExport,NetExport,Netname):
 
-    path = "NyaruTaffy"
+    path = Netname
 
     if(HubertExport):
         device = torch.device("cuda")
@@ -70,4 +70,14 @@ def main(HubertExport,NetExport):
 
 
 if __name__ == '__main__':
-    main(False,True)
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--export_hubert',type=int,help='Export hubert or not, 0 for not export, 1 for export')
+    parser.add_argument('--export_model',type=int,help='Export the model or not, 0 for not export, 1 for export')
+    parser.add_argument('--model_name',type=str,help='The name of the model. It helps to find the path')
+
+    args = parser.parse_args()
+    if not args.export_hubert or not args.export_model or not args.model_name:
+        parser.print_help()
+        sys.exit(0)
+    else:
+        main(args.export_hubert,args.export_model,args.model_name)
