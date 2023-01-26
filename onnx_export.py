@@ -37,7 +37,7 @@ def main(HubertExport,NetExport,Netpath,Netfile):
             hps.data.filter_length // 2 + 1,
             hps.train.segment_size // hps.data.hop_length,
             **hps.model)
-        _ = utils.load_checkpoint(f"{Netpath}/{Netfile}", SVCVITS, None)
+        _ = utils.load_checkpoint(f"{Netpath}/{Netfile}.pth", SVCVITS, None)
         _ = SVCVITS.eval().to(device)
         for i in SVCVITS.parameters():
             i.requires_grad = False
@@ -55,7 +55,7 @@ def main(HubertExport,NetExport,Netpath,Netfile):
                             test_pitch.to(device),
                             test_sid.to(device)
                         ),
-                        f"{Netpath}/model.onnx",
+                        f"{Netpath}/{Netfile}.onnx",
                         dynamic_axes={
                             "hidden_unit": [0, 1],
                             "pitch": [1]
