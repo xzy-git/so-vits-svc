@@ -1,103 +1,69 @@
-import gradio as gr
+import io
 import os
-os.system('cd monotonic_align && python setup.py build_ext --inplace && cd ..')
 
+# os.system("wget -P cvec/ https://huggingface.co/spaces/innnky/nanami/resolve/main/checkpoint_best_legacy_500.pt")
+import gradio as gr
+import librosa
+import numpy as np
+import soundfile
+from inference.infer_tool import Svc
 import logging
 
-numba_logger = logging.getLogger('numba')
-numba_logger.setLevel(logging.WARNING)
+logging.getLogger('numba').setLevel(logging.WARNING)
+logging.getLogger('markdown_it').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
 
-import librosa
-import torch
+config_path = "configs/config.json"
 
-import commons
-import utils
-from models import SynthesizerTrn
-from text.symbols import symbols
-from text import text_to_sequence
-def resize2d(source, target_len):
-    source[source<0.001] = np.nan
-    target = np.interp(np.arange(0, len(source)*target_len, len(source))/ target_len, np.arange(0, len(source)), source)
-    return np.nan_to_num(target)
-def convert_wav_22050_to_f0(audio):
-    tmp = librosa.pyin(audio,
-                fmin=librosa.note_to_hz('C0'),
-                fmax=librosa.note_to_hz('C7'),
-                frame_length=1780)[0]
-    f0 = np.zeros_like(tmp)
-    f0[tmp>0] = tmp[tmp>0]
-    return f0
-
-def get_text(text, hps):
-    text_norm = text_to_sequence(text, hps.data.text_cleaners)
-    if hps.data.add_blank:
-        text_norm = commons.intersperse(text_norm, 0)
-    text_norm = torch.LongTensor(text_norm)
-    print(text_norm.shape)
-    return text_norm
+model = Svc("logs/44k/G_114400.pth", "configs/config.json", cluster_model_path="logs/44k/kmeans_10000.pt")
 
 
-hps = utils.get_hparams_from_file("configs/ljs_base.json")
-hps_ms = utils.get_hparams_from_file("configs/vctk_base.json")
-net_g_ms = SynthesizerTrn(
-    len(symbols),
-    hps_ms.data.filter_length // 2 + 1,
-    hps_ms.train.segment_size // hps.data.hop_length,
-    n_speakers=hps_ms.data.n_speakers,
-    **hps_ms.model)
 
-import numpy as np
-
-hubert = torch.hub.load("bshall/hubert:main", "hubert_soft")
-
-_ = utils.load_checkpoint("G_312000.pth", net_g_ms, None)
-
-def vc_fn(input_audio,vc_transform):
+def vc_fn(sid, input_audio, vc_transform, auto_f0,cluster_ratio, slice_db, noise_scale):
     if input_audio is None:
         return "You need to upload an audio", None
     sampling_rate, audio = input_audio
     # print(audio.shape,sampling_rate)
     duration = audio.shape[0] / sampling_rate
-    if duration > 30:
-        return "Error: Audio is too long", None
+    if duration > 90:
+        return "请上传小于90s的音频，需要转换长音频请本地进行转换", None
     audio = (audio / np.iinfo(audio.dtype).max).astype(np.float32)
     if len(audio.shape) > 1:
         audio = librosa.to_mono(audio.transpose(1, 0))
     if sampling_rate != 16000:
         audio = librosa.resample(audio, orig_sr=sampling_rate, target_sr=16000)
-
-    audio22050 = librosa.resample(audio, orig_sr=16000, target_sr=22050)
-    f0 = convert_wav_22050_to_f0(audio22050)
-
-    source = torch.FloatTensor(audio).unsqueeze(0).unsqueeze(0)
-    print(source.shape)
-    with torch.inference_mode():
-        units = hubert.units(source)
-        soft = units.squeeze(0).numpy()
-        print(sampling_rate)
-        f0 = resize2d(f0, len(soft[:, 0])) * vc_transform
-        soft[:, 0] = f0 / 10
-    sid = torch.LongTensor([0])
-    stn_tst = torch.FloatTensor(soft)
-    with torch.no_grad():
-        x_tst = stn_tst.unsqueeze(0)
-        x_tst_lengths = torch.LongTensor([stn_tst.size(0)])
-        audio = net_g_ms.infer(x_tst, x_tst_lengths,sid=sid, noise_scale=0.1, noise_scale_w=0.1, length_scale=1)[0][
-            0, 0].data.float().numpy()
-
-    return "Success", (hps.data.sampling_rate, audio)
-
+    print(audio.shape)
+    out_wav_path = "temp.wav"
+    soundfile.write(out_wav_path, audio, 16000, format="wav")
+    print( cluster_ratio, auto_f0, noise_scale)
+    _audio = model.slice_inference(out_wav_path, sid, vc_transform, slice_db, cluster_ratio, auto_f0, noise_scale)
+    return "Success", (44100, _audio)
 
 
 app = gr.Blocks()
 with app:
     with gr.Tabs():
         with gr.TabItem("Basic"):
-            vc_input3 = gr.Audio(label="Input Audio (30s limitation)")
-            vc_transform = gr.Number(label="transform",value=1.0)
-            vc_submit = gr.Button("Convert", variant="primary")
+            gr.Markdown(value="""
+                sovits4.0 在线demo
+                
+                此demo为预训练底模在线demo，使用数据：云灏 即霜 辉宇·星AI 派蒙 绫地宁宁
+                """)
+            spks = list(model.spk2id.keys())
+            sid = gr.Dropdown(label="音色", choices=spks, value=spks[0])
+            vc_input3 = gr.Audio(label="上传音频（长度小于90秒）")
+            vc_transform = gr.Number(label="变调（整数，可以正负，半音数量，升高八度就是12）", value=0)
+            cluster_ratio = gr.Number(label="聚类模型混合比例，0-1之间，默认为0不启用聚类，能提升音色相似度，但会导致咬字下降（如果使用建议0.5左右）", value=0)
+            auto_f0 = gr.Checkbox(label="自动f0预测，配合聚类模型f0预测效果更好,会导致变调功能失效（仅限转换语音，歌声不要勾选此项会究极跑调）", value=False)
+            slice_db = gr.Number(label="切片阈值", value=-40)
+            noise_scale = gr.Number(label="noise_scale 建议不要动，会影响音质，玄学参数", value=0.4)
+            vc_submit = gr.Button("转换", variant="primary")
             vc_output1 = gr.Textbox(label="Output Message")
             vc_output2 = gr.Audio(label="Output Audio")
-        vc_submit.click(vc_fn, [ vc_input3,vc_transform], [vc_output1, vc_output2])
+        vc_submit.click(vc_fn, [sid, vc_input3, vc_transform,auto_f0,cluster_ratio, slice_db, noise_scale], [vc_output1, vc_output2])
 
     app.launch()
+
+
+
