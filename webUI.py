@@ -1,5 +1,7 @@
 import io
 import os
+import argparse
+import json
 
 # os.system("wget -P cvec/ https://huggingface.co/spaces/innnky/nanami/resolve/main/checkpoint_best_legacy_500.pt")
 import gradio as gr
@@ -15,9 +17,26 @@ import subprocess
 import edge_tts
 import asyncio
 from scipy.io import wavfile
-import librosa
 import torch
 import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--user", type=str, help='set gradio user', default=None)
+parser.add_argument("--password", type=str, help='set gradio password', default=None)
+cmd_opts = parser.parse_args()
+
+#read ckpt lsit
+file_list = os.listdir("logs/44k")
+ckpt_list = []
+cluster_list = []
+for ck in file_list:
+    if os.path.splitext(ck)[-1] == ".pth" and ck[0] != "k":
+        ckpt_list.append(ck)
+    if ck[0] == "k":
+        cluster_list.append(ck)
+if not cluster_list:
+    cluster_list = ["你没有聚类模型"]
+    print("no clu")
 
 logging.getLogger('numba').setLevel(logging.WARNING)
 logging.getLogger('markdown_it').setLevel(logging.WARNING)
@@ -54,6 +73,11 @@ def vc_fn(sid, input_audio, vc_transform, auto_f0,cluster_ratio, slice_db, noise
         #构建保存文件的路径，并保存到results文件夹内
         try:
             timestamp = str(int(time.time()))
+
+            output_path="./results"
+            if not os.path.exists(output_path):
+                os.makedirs(output_path)
+
             output_file = os.path.join("./results", sid + "_" + timestamp + ".wav")
             soundfile.write(output_file, _audio, model.target_sample, format="wav")
             return "Success", (model.target_sample, _audio)
@@ -64,14 +88,15 @@ def vc_fn(sid, input_audio, vc_transform, auto_f0,cluster_ratio, slice_db, noise
         if debug:traceback.print_exc()
         return "异常信息:"+str(e)+"\n请排障后重试",None
     
-def tts_func(_text,_rate):
+async def tts_func(_text,_rate):
     #使用edge-tts把文字转成音频
     # voice = "zh-CN-XiaoyiNeural"#女性，较高音
     # voice = "zh-CN-YunxiNeural"#男性
     voice = "zh-CN-YunxiNeural"#男性
     output_file = _text[0:10]+".wav"
-    # communicate = edge_tts.Communicate(_text, voice)
-    # await communicate.save(output_file)
+    communicate = edge_tts.Communicate(_text, voice)
+    await communicate.save(output_file)
+
     if _rate>=0:
         ratestr="+{:.0%}".format(_rate)
     elif _rate<0:
@@ -117,26 +142,16 @@ with app:
             gr.Markdown(value="""
                 Sovits4.0 WebUI
                 """)
-            
-            gr.Markdown(value="""
-                <font size=3>下面是模型文件选择：</font>
-                """)
-            model_path = gr.File(label="模型文件")
-            gr.Markdown(value="""
-                <font size=3>下面是配置文件选择：</font>
-                """)
-            config_path = gr.File(label="配置文件")
-            gr.Markdown(value="""
-                <font size=3>下面是聚类模型文件选择，没有可以不填：</font>
-                """)
-            cluster_model_path = gr.File(label="聚类模型文件")
+
+            model_path = gr.Dropdown(label="模型选择", choices=ckpt_list, value="no_model")
+            config_path = gr.Dropdown(label="配置文件", choices=os.listdir("configs"), value="no_config")
+            cluster_model_path = gr.Dropdown(label="选择聚类模型", choices=cluster_list, value="no_clu")
+
             device = gr.Dropdown(label="推理设备，默认为自动选择cpu和gpu",choices=["Auto",*cuda,"cpu"],value="Auto")
             enhance = gr.Checkbox(label="是否使用NSF_HIFIGAN增强,该选项对部分训练集少的模型有一定的音质增强效果，但是对训练好的模型有反面效果，默认关闭", value=False)
-            gr.Markdown(value="""
-                <font size=3>全部上传完毕后(全部文件模块显示download),点击模型解析进行解析：</font>
-                """)
-            model_analysis_button = gr.Button(value="模型解析")
-            model_unload_button = gr.Button(value="模型卸载")
+
+            model_analysis_button = gr.Button(value="模型解析", variant="primary")
+            model_unload_button = gr.Button(value="模型卸载", variant="primary")
             sid = gr.Dropdown(label="音色（说话人）")
             sid_output = gr.Textbox(label="Output Message")
 
@@ -161,8 +176,12 @@ with app:
             vc_output2 = gr.Audio(label="Output Audio")
             def modelAnalysis(model_path,config_path,cluster_model_path,device,enhance):
                 global model
+                model_path_str = "logs/44k/" + model_path
+                config_path_str = "configs/" + config_path
+                cluster_model_path_str = "logs/44k/" + cluster_model_path
+
                 try:
-                    model = Svc(model_path.name, config_path.name,device=device if device!="Auto" else None,cluster_model_path= cluster_model_path.name if cluster_model_path!=None else "",nsf_hifigan_enhance=enhance)
+                    model = Svc(model_path_str, config_path_str,device=device if device!="Auto" else None,cluster_model_path= cluster_model_path_str if cluster_model_path!=None else "",nsf_hifigan_enhance=enhance)
                     spks = list(model.spk2id.keys())
                     device_name = torch.cuda.get_device_properties(model.dev).name if "cuda" in str(model.dev) else str(model.dev)
                     return sid.update(choices = spks,value=spks[0]),"ok,模型被加载到了设备{}之上".format(device_name)
@@ -181,6 +200,5 @@ with app:
         vc_submit2.click(vc_fn2, [sid, vc_input3, vc_transform,auto_f0,cluster_ratio, slice_db, noise_scale,pad_seconds,cl_num,lg_num,lgr_num,text2tts,tts_rate,F0_mean_pooling,enhancer_adaptive_key], [vc_output1, vc_output2])
         model_analysis_button.click(modelAnalysis,[model_path,config_path,cluster_model_path,device,enhance],[sid,sid_output])
         model_unload_button.click(modelUnload,[],[sid,sid_output])
-    app.launch()
 
-
+app.launch(share=True, auth=(cmd_opts.user, cmd_opts.password))
